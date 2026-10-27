@@ -1,0 +1,6 @@
+.git
+.github
+go2rtc-mcp
+*.md
+docker-compose*.yml
+docker-workflow.yml
