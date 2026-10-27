@@ -1,8 +1,7 @@
 # go2rtc-mcp
 
 A small, read-only [MCP](https://modelcontextprotocol.io) server that lets an AI assistant take
-live snapshots from cameras managed by [go2rtc](https://github.com/AlexxIT/go2rtc) (standalone or
-the one built into Frigate).
+live snapshots from cameras managed by [go2rtc](https://github.com/AlexxIT/go2rtc).
 
 ```
 MCP client (e.g. signal-ollama) ⇄ go2rtc-mcp ⇄ go2rtc
@@ -54,8 +53,9 @@ services:
 MCP clients on the same Docker network connect to `http://go2rtc-mcp:8090/mcp`.
 `GET /healthz` returns 200 when go2rtc is reachable.
 
-With Frigate, go2rtc's API is on port 1984 of the Frigate container. Either put go2rtc-mcp on the
-same Docker network as Frigate, or publish port 1984 from Frigate.
+go2rtc's API listens on port 1984 by default. If go2rtc runs in another container, either put
+go2rtc-mcp on the same Docker network and use that container's name as the host, or publish
+port 1984.
 
 Quick check that snapshots work, before involving MCP at all:
 
