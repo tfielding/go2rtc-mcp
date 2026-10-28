@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/tfielding/go2rtc-mcp/internal/tools"
 )
 
+// version is set at build time: -ldflags "-X main.version=v1.2.3".
 var version = "dev"
 
 type config struct {
@@ -58,6 +60,15 @@ func loadConfig() (config, error) {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: go2rtc-mcp [-version]\n\nConfigured with environment variables; see the README.\n")
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("go2rtc-mcp", version)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)

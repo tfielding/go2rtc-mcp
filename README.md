@@ -1,5 +1,8 @@
 # go2rtc-mcp
 
+[![ci](https://github.com/tfielding/go2rtc-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/tfielding/go2rtc-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A small, read-only [MCP](https://modelcontextprotocol.io) server that lets an AI assistant take
 live snapshots from cameras managed by [go2rtc](https://github.com/AlexxIT/go2rtc).
 
@@ -69,11 +72,22 @@ Locally:
 GO2RTC_URL=http://<go2rtc-host>:1984 go run .
 ```
 
+## Install without Docker
+
+```bash
+go install github.com/tfielding/go2rtc-mcp@latest
+go2rtc-mcp -version
+```
+
 ## Develop
 
 ```bash
 go test -race ./...
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full set of checks CI runs, and
+[SECURITY.md](SECURITY.md) for reporting vulnerabilities. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 Tests run the real MCP client from the official Go SDK against the server and a fake go2rtc.
 
