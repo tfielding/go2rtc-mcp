@@ -1,0 +1,16 @@
+services:
+  go2rtc-mcp:
+    container_name: go2rtc-mcp
+    image: ghcr.io/tfielding/go2rtc-mcp:latest
+    restart: always
+    environment:
+      - GO2RTC_URL=http://<go2rtc-host>:1984
+      # - GO2RTC_USERNAME=admin        # if go2rtc's API has a username/password
+      # - GO2RTC_PASSWORD=...
+      # - CAMERAS=driveway,front_door  # limit which cameras are exposed (default: all)
+      # - SNAPSHOT_WIDTH=1280          # default snapshot width; 0 = native
+      # - AUTH_TOKEN=...               # require "Authorization: Bearer <token>" from MCP clients
+    # No ports needed if MCP clients (e.g. signal-ollama) are on the same Docker network:
+    # they connect to http://go2rtc-mcp:8090/mcp
+    # ports:
+    #   - "127.0.0.1:8090:8090"
