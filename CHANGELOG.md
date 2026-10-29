@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-29
+
 ### Added
 - Read-only MCP server (Streamable HTTP) for go2rtc with `list_cameras` and `get_snapshot`.
 - Stream sources (which contain camera credentials) are never exposed; only known camera names
