@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format follows
   A camera that fails is reported without failing the others.
 - `camera_status` tool: whether go2rtc is connected to each camera, its codecs and viewer count,
   and optionally (`check`) whether it is online.
+- `SNAPSHOT_CACHE` (default `2s`): a camera's frame is reused for this long, and simultaneous
+  requests share one fetch, so a looping model can't hammer cameras.
+- `GO2RTC_TIMEOUT` (default `20s`, previously fixed): limit for each go2rtc request. Snapshots that
+  time out now say so instead of a generic error.
 
 ### Security
 - Snapshot errors no longer pass go2rtc's error text to the client, since it can contain camera

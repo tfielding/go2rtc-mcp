@@ -28,6 +28,7 @@ var version = "dev"
 type config struct {
 	go2rtcURL, go2rtcUser, go2rtcPass string
 	listen                            string
+	timeout                           time.Duration
 	token                             string
 	opt                               tools.Options
 }
@@ -56,6 +57,12 @@ func loadConfig() (config, error) {
 	if c.opt.MaxWidth, err = strconv.Atoi(env("MAX_WIDTH", "1920")); err != nil || c.opt.MaxWidth < 0 {
 		return c, errors.New("MAX_WIDTH must be a non-negative integer (0 = no cap)")
 	}
+	if c.timeout, err = duration("GO2RTC_TIMEOUT", "20s"); err != nil || c.timeout <= 0 {
+		return c, errors.New("GO2RTC_TIMEOUT must be a positive duration, e.g. 20s or 1m (bare numbers are seconds)")
+	}
+	if c.opt.CacheTTL, err = duration("SNAPSHOT_CACHE", "2s"); err != nil || c.opt.CacheTTL < 0 {
+		return c, errors.New("SNAPSHOT_CACHE must be a non-negative duration, e.g. 2s (0 = no cache; bare numbers are seconds)")
+	}
 	return c, nil
 }
 
@@ -83,7 +90,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	src := go2rtc.New(cfg.go2rtcURL, cfg.go2rtcUser, cfg.go2rtcPass)
+	src := go2rtc.New(cfg.go2rtcURL, cfg.go2rtcUser, cfg.go2rtcPass, cfg.timeout)
 	srv := &http.Server{Addr: cfg.listen, Handler: newHandler(src, cfg), ReadHeaderTimeout: 10 * time.Second}
 
 	allowed := "all"
@@ -91,7 +98,7 @@ func run() error {
 		allowed = fmt.Sprint(len(cfg.opt.Allowed))
 	}
 	slog.Info("starting", "version", version, "listen", cfg.listen, "go2rtc", cfg.go2rtcURL,
-		"cameras", allowed, "auth", cfg.token != "")
+		"cameras", allowed, "auth", cfg.token != "", "timeout", cfg.timeout, "cache", cfg.opt.CacheTTL)
 	if err := src.Ping(ctx); err != nil {
 		slog.Warn("go2rtc not reachable yet", "err", err)
 	}
@@ -139,6 +146,15 @@ func requireToken(token string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// duration reads a Go duration ("20s", "1m"); a bare number is taken as seconds.
+func duration(key, def string) (time.Duration, error) {
+	v := env(key, def)
+	if n, err := strconv.ParseFloat(v, 64); err == nil {
+		return time.Duration(n * float64(time.Second)), nil
+	}
+	return time.ParseDuration(v)
 }
 
 func env(key, def string) string {

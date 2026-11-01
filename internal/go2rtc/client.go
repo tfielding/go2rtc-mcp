@@ -24,12 +24,14 @@ type Client struct {
 	http     *http.Client
 }
 
-func New(baseURL, user, password string) *Client {
+// New returns a client; timeout bounds each request to go2rtc, including the wait for a camera
+// that go2rtc has to connect to first.
+func New(baseURL, user, password string, timeout time.Duration) *Client {
 	return &Client{
 		base:     strings.TrimRight(baseURL, "/"),
 		user:     user,
 		password: password,
-		http:     &http.Client{Timeout: 20 * time.Second},
+		http:     &http.Client{Timeout: timeout},
 	}
 }
 

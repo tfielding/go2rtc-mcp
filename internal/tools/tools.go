@@ -3,8 +3,10 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ type Options struct {
 	Allowed      map[string]bool // lowercased camera names; empty = all cameras
 	DefaultWidth int             // snapshot width in pixels; 0 = native
 	MaxWidth     int             // cap on requested width; 0 = no cap
+	CacheTTL     time.Duration   // reuse a camera's frame for this long; 0 = always fetch
 }
 
 type ListOutput struct {
@@ -66,7 +69,7 @@ const maxParallel = 4
 
 // Register adds the camera tools to s.
 func Register(s *mcp.Server, src Source, opt Options) {
-	t := &toolset{src: src, opt: opt}
+	t := &toolset{src: src, opt: opt, cache: newFrameCache(opt.CacheTTL)}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_cameras",
 		Description: "List the cameras that snapshots can be taken from.",
@@ -97,8 +100,9 @@ func readOnly(title string) *mcp.ToolAnnotations {
 }
 
 type toolset struct {
-	src Source
-	opt Options
+	src   Source
+	opt   Options
+	cache *frameCache
 }
 
 func (t *toolset) cameras(ctx context.Context) ([]string, error) {
@@ -142,13 +146,13 @@ func (t *toolset) snapshot(ctx context.Context, _ *mcp.CallToolRequest, in Snaps
 		return nil, nil, unknownCamera(in.Camera, cams)
 	}
 	width := t.width(in.Width)
-	jpeg, err := t.frame(ctx, name, width)
+	f, err := t.frame(ctx, name, width)
 	if err != nil {
 		return nil, nil, err
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{
-		&mcp.TextContent{Text: fmt.Sprintf("Snapshot from %s at %s", name, now())},
-		&mcp.ImageContent{Data: jpeg, MIMEType: "image/jpeg"},
+		&mcp.TextContent{Text: fmt.Sprintf("Snapshot from %s at %s", name, stamp(f.at))},
+		&mcp.ImageContent{Data: f.jpeg, MIMEType: "image/jpeg"},
 	}}, nil, nil
 }
 
@@ -164,7 +168,6 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 	}
 	shots := t.frames(ctx, names, t.width(in.Width))
 
-	ts := now()
 	content := []mcp.Content{}
 	failed := 0
 	for i, name := range names {
@@ -174,7 +177,7 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 			continue
 		}
 		content = append(content,
-			&mcp.TextContent{Text: fmt.Sprintf("Snapshot from %s at %s", name, ts)},
+			&mcp.TextContent{Text: fmt.Sprintf("Snapshot from %s at %s", name, stamp(shots[i].at))},
 			&mcp.ImageContent{Data: shots[i].jpeg, MIMEType: "image/jpeg"},
 		)
 	}
@@ -218,8 +221,8 @@ func (t *toolset) status(ctx context.Context, _ *mcp.CallToolRequest, in StatusI
 }
 
 type shot struct {
-	jpeg []byte
-	err  error
+	cached
+	err error
 }
 
 // frames fetches one snapshot per camera in parallel, returned in the order of names.
@@ -233,7 +236,7 @@ func (t *toolset) frames(ctx context.Context, names []string, width int) []shot 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			shots[i].jpeg, shots[i].err = t.frame(ctx, name, width)
+			shots[i].cached, shots[i].err = t.frame(ctx, name, width)
 		}()
 	}
 	wg.Wait()
@@ -276,24 +279,34 @@ func (t *toolset) width(requested int) int {
 	return w
 }
 
-// frame fetches one snapshot and logs the outcome.
-func (t *toolset) frame(ctx context.Context, name string, width int) ([]byte, error) {
-	start := time.Now()
-	jpeg, err := t.src.Frame(ctx, name, width)
-	if err != nil {
-		// go2rtc's error text can contain camera addresses or source URLs, so it stays in the log.
-		slog.Error("snapshot", "camera", name, "err", err)
-		return nil, fmt.Errorf("camera %s is offline or unreachable (details in the go2rtc-mcp log)", name)
-	}
-	slog.Info("snapshot", "camera", name, "width", width, "bytes", len(jpeg), "took", time.Since(start).Round(time.Millisecond))
-	return jpeg, nil
+// frame returns a snapshot via the cache, so a camera isn't asked again for a fresh frame.
+func (t *toolset) frame(ctx context.Context, name string, width int) (cached, error) {
+	return t.cache.get(ctx, cacheKey{name, width}, func(ctx context.Context) ([]byte, error) {
+		start := time.Now()
+		jpeg, err := t.src.Frame(ctx, name, width)
+		if err != nil {
+			// go2rtc's error text can contain camera addresses or source URLs, so it stays in the log.
+			slog.Error("snapshot", "camera", name, "err", err)
+			if isTimeout(err) {
+				return nil, fmt.Errorf("camera %s timed out; it may be offline or slow to connect (details in the go2rtc-mcp log)", name)
+			}
+			return nil, fmt.Errorf("camera %s is offline or unreachable (details in the go2rtc-mcp log)", name)
+		}
+		slog.Info("snapshot", "camera", name, "width", width, "bytes", len(jpeg), "took", time.Since(start).Round(time.Millisecond))
+		return jpeg, nil
+	})
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
 
 func unknownCamera(name string, cams []string) error {
 	return fmt.Errorf("unknown camera %q; available: %s", name, strings.Join(cams, ", "))
 }
 
-func now() string { return time.Now().Format("2006-01-02 15:04:05 MST") }
+func stamp(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") }
 
 func find(names []string, want string) (string, bool) {
 	want = strings.TrimSpace(want)

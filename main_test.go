@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -25,6 +26,7 @@ type fakeGo2rtc struct {
 	mu       sync.Mutex
 	frameReq []string       // "src|width"
 	offline  map[string]int // stream -> how it fails: 500 (go2rtc error) or 200 (text instead of a JPEG)
+	delay    time.Duration  // how long each frame takes, like go2rtc connecting to a camera
 }
 
 func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,8 +56,9 @@ func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		src := r.URL.Query().Get("src")
 		f.mu.Lock()
 		f.frameReq = append(f.frameReq, src+"|"+r.URL.Query().Get("width"))
-		off := f.offline[src]
+		off, delay := f.offline[src], f.delay
 		f.mu.Unlock()
+		time.Sleep(delay)
 		switch off {
 		case http.StatusInternalServerError: // real go2rtc errors can name the camera's address
 			http.Error(w, "streams: dial tcp 10.0.0.22:554: connect: connection refused", off)
@@ -90,7 +93,10 @@ func start(t *testing.T, cfg config) (*mcp.ClientSession, *fakeGo2rtc, *httptest
 	if cfg.opt.Allowed == nil {
 		cfg.opt.Allowed = map[string]bool{}
 	}
-	srv := httptest.NewServer(newHandler(go2rtc.New(g.URL, "admin", "secret"), cfg))
+	if cfg.timeout == 0 {
+		cfg.timeout = 5 * time.Second
+	}
+	srv := httptest.NewServer(newHandler(go2rtc.New(g.URL, "admin", "secret", cfg.timeout), cfg))
 	t.Cleanup(srv.Close)
 	return connect(t, srv.URL, cfg.token), fake, srv
 }
@@ -379,6 +385,61 @@ func TestCameraStatusCheck(t *testing.T) {
 	}
 }
 
+func setDelay(f *fakeGo2rtc, d time.Duration) {
+	f.mu.Lock()
+	f.delay = d
+	f.mu.Unlock()
+}
+
+func TestSnapshotCache(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, CacheTTL: time.Hour}})
+	first := text(call(t, cs, "get_snapshot", map[string]any{"camera": "driveway"}))
+	second := text(call(t, cs, "get_snapshot", map[string]any{"camera": "driveway"}))
+	call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"driveway"}})
+	if got := sortedReqs(fake); got != "driveway|1280" {
+		t.Fatalf("frame requests: %s", got)
+	}
+	if first != second { // a cached frame keeps the time it was taken
+		t.Fatalf("timestamps differ: %q vs %q", first, second)
+	}
+
+	call(t, cs, "get_snapshot", map[string]any{"camera": "driveway", "width": 640}) // other width, new frame
+	call(t, cs, "get_snapshot", map[string]any{"camera": "garage"})                 // failures aren't cached
+	call(t, cs, "get_snapshot", map[string]any{"camera": "garage"})
+	if got := sortedReqs(fake); got != "driveway|640 garage|1280 garage|1280" {
+		t.Fatalf("frame requests: %s", got)
+	}
+}
+
+func TestSnapshotCacheSharesFetchInProgress(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, CacheTTL: time.Hour}})
+	setDelay(fake, 300*time.Millisecond)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if res := call(t, cs, "get_snapshot", map[string]any{"camera": "driveway"}); res.IsError {
+				t.Errorf("error: %s", text(res))
+			}
+		}()
+	}
+	wg.Wait()
+	if got := sortedReqs(fake); got != "driveway|1280" {
+		t.Fatalf("frame requests: %s", got)
+	}
+}
+
+func TestSnapshotTimeout(t *testing.T) {
+	cs, fake, _ := start(t, config{timeout: 100 * time.Millisecond})
+	setDelay(fake, time.Second)
+	res := call(t, cs, "get_snapshot", map[string]any{"camera": "driveway"})
+	if !res.IsError || !strings.Contains(text(res), "camera driveway timed out") {
+		t.Fatalf("got %q", text(res))
+	}
+	noLeak(t, res)
+}
+
 func TestAuthToken(t *testing.T) {
 	cs, _, srv := start(t, config{token: "s3cret"})
 	if res := call(t, cs, "list_cameras", nil); res.IsError {
@@ -399,7 +460,7 @@ func TestAuthToken(t *testing.T) {
 }
 
 func TestHealthzReportsGo2rtcDown(t *testing.T) {
-	srv := httptest.NewServer(newHandler(go2rtc.New("http://127.0.0.1:1", "", ""), config{}))
+	srv := httptest.NewServer(newHandler(go2rtc.New("http://127.0.0.1:1", "", "", time.Second), config{}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/healthz")
 	if err != nil {
@@ -423,5 +484,26 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if len(c.opt.Allowed) != 2 || !c.opt.Allowed["driveway"] || c.opt.DefaultWidth != 1280 || c.listen != ":8090" {
 		t.Fatalf("%+v", c)
+	}
+	if c.timeout != 20*time.Second || c.opt.CacheTTL != 2*time.Second {
+		t.Fatalf("defaults: timeout %v, cache %v", c.timeout, c.opt.CacheTTL)
+	}
+
+	t.Setenv("GO2RTC_TIMEOUT", "45")
+	t.Setenv("SNAPSHOT_CACHE", "500ms")
+	if c, err = loadConfig(); err != nil || c.timeout != 45*time.Second || c.opt.CacheTTL != 500*time.Millisecond {
+		t.Fatalf("got timeout %v, cache %v, err %v", c.timeout, c.opt.CacheTTL, err)
+	}
+	t.Setenv("SNAPSHOT_CACHE", "0")
+	if c, err = loadConfig(); err != nil || c.opt.CacheTTL != 0 {
+		t.Fatalf("cache 0: %v, %v", c.opt.CacheTTL, err)
+	}
+	for _, bad := range [][2]string{{"GO2RTC_TIMEOUT", "0"}, {"GO2RTC_TIMEOUT", "soon"}, {"SNAPSHOT_CACHE", "-1s"}} {
+		t.Setenv("GO2RTC_TIMEOUT", "20s")
+		t.Setenv("SNAPSHOT_CACHE", "2s")
+		t.Setenv(bad[0], bad[1])
+		if _, err := loadConfig(); err == nil {
+			t.Fatalf("%s=%s accepted", bad[0], bad[1])
+		}
 	}
 }

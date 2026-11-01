@@ -28,6 +28,10 @@ go2rtc only connects to a camera while something is watching it, so `active: fal
 does not mean the camera is offline. `check: true` takes a small test frame from each camera to
 find out. go2rtc doesn't report resolution, so `camera_status` doesn't either.
 
+Snapshots for the same camera and width within `SNAPSHOT_CACHE` reuse one frame (its timestamp
+shows when it was taken), and simultaneous requests share a single fetch. This protects cameras from
+a model that calls tools in a loop. Failed snapshots aren't cached.
+
 All tools are marked read-only. There is no way to add, change or delete streams.
 
 ## Safety
@@ -51,6 +55,8 @@ All tools are marked read-only. There is no way to add, change or delete streams
 | `CAMERAS` | all | Comma-separated allowlist (case-insensitive) |
 | `SNAPSHOT_WIDTH` | `1280` | Default width; `0` = native resolution |
 | `MAX_WIDTH` | `1920` | Cap on the width a client may request; `0` = no cap |
+| `GO2RTC_TIMEOUT` | `20s` | Limit for each go2rtc request, including connecting to an idle camera |
+| `SNAPSHOT_CACHE` | `2s` | Reuse a camera's frame for this long instead of asking the camera again; `0` = off |
 | `AUTH_TOKEN` | none | Require `Authorization: Bearer <token>` on `/mcp` |
 | `LISTEN_ADDR` | `:8090` | |
 
