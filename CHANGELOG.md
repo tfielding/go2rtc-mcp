@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `get_snapshots` tool: snapshots from several cameras (or all) in one call, fetched in parallel.
+  A camera that fails is reported without failing the others.
+
 ### Changed
 - Docker `:latest` now points to the newest release. Builds from `main` are published as `:edge`,
   and releases also get a `major.minor` tag (e.g. `:0.1`).

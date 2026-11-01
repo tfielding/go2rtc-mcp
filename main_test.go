@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -129,7 +130,7 @@ func TestToolsAreListedReadOnly(t *testing.T) {
 			t.Errorf("%s not marked read-only", tool.Name)
 		}
 	}
-	if len(names) != 2 || !names["list_cameras"] || !names["get_snapshot"] {
+	if len(names) != 3 || !names["list_cameras"] || !names["get_snapshot"] || !names["get_snapshots"] {
 		t.Fatalf("tools: %v", names)
 	}
 }
@@ -206,6 +207,91 @@ func TestSnapshotErrors(t *testing.T) {
 	}
 	if strings.Join(fake.frameReq, " ") != "garage|" {
 		t.Fatalf("frame requests: %v", fake.frameReq)
+	}
+}
+
+func images(res *mcp.CallToolResult) int {
+	n := 0
+	for _, c := range res.Content {
+		if ic, ok := c.(*mcp.ImageContent); ok && bytes.Equal(ic.Data, fakeJPEG) {
+			n++
+		}
+	}
+	return n
+}
+
+func sortedReqs(f *fakeGo2rtc) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := append([]string(nil), f.frameReq...)
+	f.frameReq = nil
+	sort.Strings(r)
+	return strings.Join(r, " ")
+}
+
+func TestSnapshotsAll(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, MaxWidth: 1920}})
+	res := call(t, cs, "get_snapshots", nil)
+	if res.IsError {
+		t.Fatalf("partial failure should not be an error: %s", text(res))
+	}
+	if images(res) != 2 {
+		t.Fatalf("images: %d, content: %+v", images(res), res.Content)
+	}
+	txt := text(res)
+	for _, want := range []string{"Snapshot from Back_Yard at", "Snapshot from driveway at", "Snapshot from garage failed:"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("missing %q in %q", want, txt)
+		}
+	}
+	// Order follows camera order; each image directly follows its camera's label.
+	if c, ok := res.Content[0].(*mcp.TextContent); !ok || !strings.HasPrefix(c.Text, "Snapshot from Back_Yard") {
+		t.Fatalf("first item: %+v", res.Content[0])
+	}
+	if _, ok := res.Content[1].(*mcp.ImageContent); !ok {
+		t.Fatalf("second item: %+v", res.Content[1])
+	}
+	if got := sortedReqs(fake); got != "Back_Yard|1280 driveway|1280 garage|1280" {
+		t.Fatalf("frame requests: %s", got)
+	}
+}
+
+func TestSnapshotsSelected(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, MaxWidth: 1920}})
+	res := call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"DRIVEWAY", "back_yard", "driveway"}, "width": 99999})
+	if res.IsError || images(res) != 2 {
+		t.Fatalf("got %s", text(res))
+	}
+	if got := sortedReqs(fake); got != "Back_Yard|1920 driveway|1920" { // deduped, width capped
+		t.Fatalf("frame requests: %s", got)
+	}
+
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"driveway", "rtsp://evil/stream"}})
+	if !res.IsError || !strings.Contains(text(res), `unknown camera "rtsp://evil/stream"`) {
+		t.Fatalf("expected refusal, got %q", text(res))
+	}
+	if got := sortedReqs(fake); got != "" {
+		t.Fatalf("a refused call reached go2rtc: %s", got)
+	}
+
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"garage"}})
+	if !res.IsError || !strings.Contains(text(res), "garage failed") {
+		t.Fatalf("all-failed should be an error, got %q", text(res))
+	}
+}
+
+func TestSnapshotsAllowlist(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{Allowed: map[string]bool{"driveway": true}}})
+	res := call(t, cs, "get_snapshots", nil)
+	if res.IsError || images(res) != 1 {
+		t.Fatalf("got %s", text(res))
+	}
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"Back_Yard"}})
+	if !res.IsError {
+		t.Fatalf("expected refusal, got %q", text(res))
+	}
+	if got := sortedReqs(fake); got != "driveway|" {
+		t.Fatalf("frame requests: %s", got)
 	}
 }
 
