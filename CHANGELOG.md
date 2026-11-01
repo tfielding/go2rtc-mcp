@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
 - `camera_status` tool: whether go2rtc is connected to each camera, its codecs and viewer count,
   and optionally (`check`) whether it is online.
 
+### Security
+- Snapshot errors no longer pass go2rtc's error text to the client, since it can contain camera
+  addresses or source URLs. Clients now see "camera X is offline or unreachable"; the details are
+  logged by go2rtc-mcp.
+
 ### Changed
 - Docker `:latest` now points to the newest release. Builds from `main` are published as `:edge`,
   and releases also get a `major.minor` tag (e.g. `:0.1`).

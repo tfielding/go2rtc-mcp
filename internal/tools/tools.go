@@ -209,7 +209,6 @@ func (t *toolset) status(ctx context.Context, _ *mcp.CallToolRequest, in StatusI
 		s := byName[name]
 		out.Cameras[i] = CameraStatus{Camera: name, Active: s.Active, Media: s.Media, Viewers: s.Consumers}
 		if in.Check {
-			// go2rtc's error text can include camera addresses, so only the outcome is returned.
 			online := shots[i].err == nil
 			out.Cameras[i].Online = &online
 		}
@@ -282,8 +281,9 @@ func (t *toolset) frame(ctx context.Context, name string, width int) ([]byte, er
 	start := time.Now()
 	jpeg, err := t.src.Frame(ctx, name, width)
 	if err != nil {
+		// go2rtc's error text can contain camera addresses or source URLs, so it stays in the log.
 		slog.Error("snapshot", "camera", name, "err", err)
-		return nil, err
+		return nil, fmt.Errorf("camera %s is offline or unreachable (details in the go2rtc-mcp log)", name)
 	}
 	slog.Info("snapshot", "camera", name, "width", width, "bytes", len(jpeg), "took", time.Since(start).Round(time.Millisecond))
 	return jpeg, nil

@@ -23,8 +23,8 @@ var fakeJPEG = []byte{0xFF, 0xD8, 0xFF, 0xE0, 'f', 'a', 'k', 'e', 0xFF, 0xD9}
 // sources that contain credentials (which must never leak).
 type fakeGo2rtc struct {
 	mu       sync.Mutex
-	frameReq []string // "src|width"
-	offline  map[string]bool
+	frameReq []string       // "src|width"
+	offline  map[string]int // stream -> how it fails: 500 (go2rtc error) or 200 (text instead of a JPEG)
 }
 
 func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,9 +56,13 @@ func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.frameReq = append(f.frameReq, src+"|"+r.URL.Query().Get("width"))
 		off := f.offline[src]
 		f.mu.Unlock()
-		if off {
+		switch off {
+		case http.StatusInternalServerError: // real go2rtc errors can name the camera's address
+			http.Error(w, "streams: dial tcp 10.0.0.22:554: connect: connection refused", off)
+			return
+		case http.StatusOK:
 			w.Header().Set("Content-Type", "text/plain")
-			w.Write([]byte("streams: wrong user/pass"))
+			w.Write([]byte("streams: wrong user/pass for rtsp://user:CAMPASS@10.0.0.22/stream1"))
 			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
@@ -80,7 +84,7 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func start(t *testing.T, cfg config) (*mcp.ClientSession, *fakeGo2rtc, *httptest.Server) {
 	t.Helper()
-	fake := &fakeGo2rtc{offline: map[string]bool{"garage": true}}
+	fake := &fakeGo2rtc{offline: map[string]int{"garage": http.StatusInternalServerError}}
 	g := httptest.NewServer(fake)
 	t.Cleanup(g.Close)
 	if cfg.opt.Allowed == nil {
@@ -210,12 +214,18 @@ func TestSnapshotErrors(t *testing.T) {
 	if !res.IsError || !strings.Contains(text(res), "available: Back_Yard, driveway, garage") {
 		t.Fatalf("got %+v", text(res))
 	}
-	res = call(t, cs, "get_snapshot", map[string]any{"camera": "garage"}) // go2rtc returns text, not a JPEG
-	if !res.IsError || !strings.Contains(text(res), "instead of a JPEG") {
-		t.Fatalf("got %q", text(res))
+	for _, mode := range []int{http.StatusInternalServerError, http.StatusOK} {
+		fake.mu.Lock()
+		fake.offline["garage"] = mode
+		fake.mu.Unlock()
+		res = call(t, cs, "get_snapshot", map[string]any{"camera": "garage"})
+		if !res.IsError || !strings.Contains(text(res), "camera garage is offline or unreachable") {
+			t.Fatalf("mode %d: got %q", mode, text(res))
+		}
+		noLeak(t, res)
 	}
-	if strings.Join(fake.frameReq, " ") != "garage|" {
-		t.Fatalf("frame requests: %v", fake.frameReq)
+	if got := sortedReqs(fake); got != "garage| garage|" {
+		t.Fatalf("frame requests: %v", got)
 	}
 }
 
@@ -247,6 +257,7 @@ func TestSnapshotsAll(t *testing.T) {
 	if images(res) != 2 {
 		t.Fatalf("images: %d, content: %+v", images(res), res.Content)
 	}
+	noLeak(t, res)
 	txt := text(res)
 	for _, want := range []string{"Snapshot from Back_Yard at", "Snapshot from driveway at", "Snapshot from garage failed:"} {
 		if !strings.Contains(txt, want) {
@@ -348,9 +359,6 @@ func TestCameraStatusCheck(t *testing.T) {
 	cs, fake, _ := start(t, config{opt: tools.Options{Allowed: map[string]bool{"driveway": true, "garage": true}}})
 	res := call(t, cs, "camera_status", map[string]any{"check": true})
 	noLeak(t, res)
-	if strings.Contains(text(res), "wrong user/pass") {
-		t.Fatalf("go2rtc error text passed through: %s", text(res))
-	}
 	got := status(t, res)
 	if len(got) != 2 || got[0].Camera != "driveway" || got[1].Camera != "garage" {
 		t.Fatalf("cameras: %+v", got)
