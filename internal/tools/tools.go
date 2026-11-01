@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tfielding/go2rtc-mcp/internal/go2rtc"
 )
 
 // Source is the camera backend (implemented by go2rtc.Client).
 type Source interface {
 	Streams(ctx context.Context) ([]string, error)
 	Frame(ctx context.Context, stream string, width int) ([]byte, error)
+	Status(ctx context.Context) ([]go2rtc.StreamStatus, error)
 }
 
 type Options struct {
@@ -38,10 +41,30 @@ type SnapshotsInput struct {
 	Width   int      `json:"width,omitempty" jsonschema:"optional image width in pixels for every image; smaller is faster"`
 }
 
+type StatusInput struct {
+	Cameras []string `json:"cameras,omitempty" jsonschema:"camera names, as returned by list_cameras; omit for all cameras"`
+	Check   bool     `json:"check,omitempty" jsonschema:"also take a small test frame from each camera to tell whether it is online; slower"`
+}
+
+type StatusOutput struct {
+	Cameras []CameraStatus `json:"cameras"`
+}
+
+type CameraStatus struct {
+	Camera  string   `json:"camera"`
+	Active  bool     `json:"active" jsonschema:"go2rtc is connected to the camera right now; false only means nobody is watching, not that it is offline"`
+	Media   []string `json:"media,omitempty" jsonschema:"tracks and codecs while active, e.g. 'video, recvonly, H264'"`
+	Viewers int      `json:"viewers" jsonschema:"clients currently watching the stream"`
+	Online  *bool    `json:"online,omitempty" jsonschema:"only with check: whether a test frame could be taken"`
+}
+
+// checkWidth is the frame width used by camera_status check; small, since the image is discarded.
+const checkWidth = 320
+
 // maxParallel limits concurrent frame requests to go2rtc in get_snapshots.
 const maxParallel = 4
 
-// Register adds list_cameras, get_snapshot and get_snapshots to s.
+// Register adds the camera tools to s.
 func Register(s *mcp.Server, src Source, opt Options) {
 	t := &toolset{src: src, opt: opt}
 	mcp.AddTool(s, &mcp.Tool{
@@ -60,6 +83,12 @@ func Register(s *mcp.Server, src Source, opt Options) {
 			"Each image is preceded by a line naming its camera. Cameras that fail are reported without failing the rest.",
 		Annotations: readOnly("Camera snapshots"),
 	}, t.snapshots)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "camera_status",
+		Description: "Show each camera's state: whether go2rtc is connected to it now, its codecs and how many clients are watching. " +
+			"go2rtc only connects while someone watches, so inactive is normal; use check to test whether cameras are online.",
+		Annotations: readOnly("Camera status"),
+	}, t.status)
 }
 
 func readOnly(title string) *mcp.ToolAnnotations {
@@ -129,43 +158,11 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 		return nil, nil, err
 	}
 	// Resolve every name before contacting go2rtc, so one bad name sends no requests at all.
-	names := cams
-	if len(in.Cameras) > 0 {
-		names = nil
-		seen := map[string]bool{}
-		for _, want := range in.Cameras {
-			name, ok := find(cams, want)
-			if !ok {
-				return nil, nil, unknownCamera(want, cams)
-			}
-			if !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-		}
+	names, err := resolve(cams, in.Cameras)
+	if err != nil {
+		return nil, nil, err
 	}
-	if len(names) == 0 {
-		return nil, nil, fmt.Errorf("no cameras available")
-	}
-
-	width := t.width(in.Width)
-	type shot struct {
-		jpeg []byte
-		err  error
-	}
-	shots := make([]shot, len(names))
-	sem := make(chan struct{}, maxParallel)
-	var wg sync.WaitGroup
-	for i, name := range names {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			shots[i].jpeg, shots[i].err = t.frame(ctx, name, width)
-		}()
-	}
-	wg.Wait()
+	shots := t.frames(ctx, names, t.width(in.Width))
 
 	ts := now()
 	content := []mcp.Content{}
@@ -183,6 +180,89 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 	}
 	// Only a total failure is an error; partial results are still useful.
 	return &mcp.CallToolResult{Content: content, IsError: failed == len(names)}, nil, nil
+}
+
+func (t *toolset) status(ctx context.Context, _ *mcp.CallToolRequest, in StatusInput) (*mcp.CallToolResult, StatusOutput, error) {
+	cams, err := t.cameras(ctx)
+	if err != nil {
+		return nil, StatusOutput{}, err
+	}
+	names, err := resolve(cams, in.Cameras)
+	if err != nil {
+		return nil, StatusOutput{}, err
+	}
+	all, err := t.src.Status(ctx)
+	if err != nil {
+		return nil, StatusOutput{}, err
+	}
+	byName := make(map[string]go2rtc.StreamStatus, len(all))
+	for _, s := range all {
+		byName[s.Name] = s
+	}
+	var shots []shot
+	if in.Check {
+		shots = t.frames(ctx, names, checkWidth)
+	}
+
+	out := StatusOutput{Cameras: make([]CameraStatus, len(names))}
+	for i, name := range names {
+		s := byName[name]
+		out.Cameras[i] = CameraStatus{Camera: name, Active: s.Active, Media: s.Media, Viewers: s.Consumers}
+		if in.Check {
+			// go2rtc's error text can include camera addresses, so only the outcome is returned.
+			online := shots[i].err == nil
+			out.Cameras[i].Online = &online
+		}
+	}
+	slog.Info("camera_status", "count", len(names), "check", in.Check)
+	return nil, out, nil
+}
+
+type shot struct {
+	jpeg []byte
+	err  error
+}
+
+// frames fetches one snapshot per camera in parallel, returned in the order of names.
+func (t *toolset) frames(ctx context.Context, names []string, width int) []shot {
+	shots := make([]shot, len(names))
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			shots[i].jpeg, shots[i].err = t.frame(ctx, name, width)
+		}()
+	}
+	wg.Wait()
+	return shots
+}
+
+// resolve maps requested names to known cameras, deduplicated; empty means all cameras.
+// Any unknown name fails the whole request.
+func resolve(cams, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		if len(cams) == 0 {
+			return nil, fmt.Errorf("no cameras available")
+		}
+		return cams, nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, want := range requested {
+		name, ok := find(cams, want)
+		if !ok {
+			return nil, unknownCamera(want, cams)
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // width applies the default and the cap to a requested width.

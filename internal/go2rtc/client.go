@@ -53,6 +53,61 @@ func (c *Client) Streams(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// StreamStatus is the safe subset of a stream's state in /api/streams.
+type StreamStatus struct {
+	Name      string
+	Active    bool     // go2rtc is connected to the camera right now
+	Media     []string // e.g. "video, recvonly, H264"; only known while active
+	Consumers int
+}
+
+// Producer and stream shapes declare only fields that are safe to expose.
+// Everything else (url, remote_addr, sdp, user_agent, ...) is dropped while decoding.
+type rawProducer struct {
+	FormatName string            `json:"format_name"`
+	Medias     []json.RawMessage `json:"medias"`
+}
+
+type rawStream struct {
+	Producers []rawProducer     `json:"producers"`
+	Consumers []json.RawMessage `json:"consumers"`
+}
+
+// Status returns the state of every stream, sorted by name.
+// go2rtc connects to cameras on demand, so an inactive stream is idle, not necessarily offline.
+func (c *Client) Status(ctx context.Context) ([]StreamStatus, error) {
+	body, _, err := c.get(ctx, "/api/streams", 4<<20)
+	if err != nil {
+		return nil, err
+	}
+	var streams map[string]rawStream
+	if err := json.Unmarshal(body, &streams); err != nil {
+		return nil, fmt.Errorf("go2rtc /api/streams: unexpected response: %w", err)
+	}
+	out := make([]StreamStatus, 0, len(streams))
+	for name, st := range streams {
+		s := StreamStatus{Name: name, Consumers: len(st.Consumers)}
+		seen := map[string]bool{}
+		for _, p := range st.Producers {
+			// An idle producer is only {"url": ...}; a connected one carries connection details.
+			if p.FormatName == "" && len(p.Medias) == 0 {
+				continue
+			}
+			s.Active = true
+			for _, raw := range p.Medias {
+				var m string
+				if json.Unmarshal(raw, &m) == nil && !seen[m] {
+					seen[m] = true
+					s.Media = append(s.Media, m)
+				}
+			}
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // Frame returns a JPEG snapshot of the named stream. width <= 0 keeps the native size.
 func (c *Client) Frame(ctx context.Context, stream string, width int) ([]byte, error) {
 	q := url.Values{"src": {stream}}

@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - `get_snapshots` tool: snapshots from several cameras (or all) in one call, fetched in parallel.
   A camera that fails is reported without failing the others.
+- `camera_status` tool: whether go2rtc is connected to each camera, its codecs and viewer count,
+  and optionally (`check`) whether it is online.
 
 ### Changed
 - Docker `:latest` now points to the newest release. Builds from `main` are published as `:edge`,

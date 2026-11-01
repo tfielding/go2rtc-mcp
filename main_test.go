@@ -37,7 +37,16 @@ func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"version":"1.9.9"}`))
 	case "/api/streams":
 		w.Write([]byte(`{
-		  "driveway": {"producers":[{"url":"rtsp://user:CAMPASS@10.0.0.20/stream1"}],"consumers":[]},
+		  "driveway": {
+		    "producers":[{
+		      "id":1,"format_name":"rtsp","protocol":"rtsp+tcp","remote_addr":"10.0.0.20:554",
+		      "url":"rtsp://user:CAMPASS@10.0.0.20/stream1","user_agent":"CamFirmware/1.0",
+		      "sdp":"v=0\r\no=- 0 0 IN IP4 10.0.0.20\r\na=control:rtsp://user:CAMPASS@10.0.0.20/stream1",
+		      "medias":["video, recvonly, H264","audio, recvonly, PCMA/8000","video, recvonly, H264"],
+		      "receivers":[{"codec":{"codec_name":"h264","codec_type":"video"}}],"bytes_recv":12345
+		    }],
+		    "consumers":[{"format_name":"mjpeg","remote_addr":"10.0.0.99:51234","user_agent":"Mozilla"}]
+		  },
 		  "Back_Yard": {"producers":[{"url":"rtsp://user:CAMPASS@10.0.0.21/stream1"}]},
 		  "garage": {"producers":[{"url":"rtsp://user:CAMPASS@10.0.0.22/stream1"}]}
 		}`))
@@ -130,7 +139,7 @@ func TestToolsAreListedReadOnly(t *testing.T) {
 			t.Errorf("%s not marked read-only", tool.Name)
 		}
 	}
-	if len(names) != 3 || !names["list_cameras"] || !names["get_snapshot"] || !names["get_snapshots"] {
+	if len(names) != 4 || !names["list_cameras"] || !names["get_snapshot"] || !names["get_snapshots"] || !names["camera_status"] {
 		t.Fatalf("tools: %v", names)
 	}
 }
@@ -292,6 +301,73 @@ func TestSnapshotsAllowlist(t *testing.T) {
 	}
 	if got := sortedReqs(fake); got != "driveway|" {
 		t.Fatalf("frame requests: %s", got)
+	}
+}
+
+func noLeak(t *testing.T, v any) {
+	t.Helper()
+	raw, _ := json.Marshal(v)
+	for _, secret := range []string{"CAMPASS", "rtsp://", "10.0.0.", "CamFirmware", "Mozilla", "IN IP4"} {
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("leaked %q: %s", secret, raw)
+		}
+	}
+}
+
+func status(t *testing.T, res *mcp.CallToolResult) []tools.CameraStatus {
+	t.Helper()
+	if res.IsError {
+		t.Fatalf("error: %s", text(res))
+	}
+	var out tools.StatusOutput
+	b, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Cameras
+}
+
+func TestCameraStatus(t *testing.T) {
+	cs, fake, _ := start(t, config{})
+	res := call(t, cs, "camera_status", nil)
+	noLeak(t, res)
+	got := status(t, res)
+	b, _ := json.Marshal(got)
+	want := `[{"camera":"Back_Yard","active":false,"viewers":0},` +
+		`{"camera":"driveway","active":true,"media":["video, recvonly, H264","audio, recvonly, PCMA/8000"],"viewers":1},` +
+		`{"camera":"garage","active":false,"viewers":0}]`
+	if string(b) != want {
+		t.Fatalf("got  %s\nwant %s", b, want)
+	}
+	if got := sortedReqs(fake); got != "" {
+		t.Fatalf("status without check took frames: %s", got)
+	}
+}
+
+func TestCameraStatusCheck(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{Allowed: map[string]bool{"driveway": true, "garage": true}}})
+	res := call(t, cs, "camera_status", map[string]any{"check": true})
+	noLeak(t, res)
+	if strings.Contains(text(res), "wrong user/pass") {
+		t.Fatalf("go2rtc error text passed through: %s", text(res))
+	}
+	got := status(t, res)
+	if len(got) != 2 || got[0].Camera != "driveway" || got[1].Camera != "garage" {
+		t.Fatalf("cameras: %+v", got)
+	}
+	if got[0].Online == nil || !*got[0].Online || got[1].Online == nil || *got[1].Online {
+		t.Fatalf("online: %+v", got)
+	}
+	if r := sortedReqs(fake); r != "driveway|320 garage|320" {
+		t.Fatalf("frame requests: %s", r)
+	}
+
+	res = call(t, cs, "camera_status", map[string]any{"cameras": []string{"Back_Yard"}, "check": true})
+	if !res.IsError || !strings.Contains(text(res), `unknown camera "Back_Yard"`) {
+		t.Fatalf("expected refusal, got %q", text(res))
+	}
+	if r := sortedReqs(fake); r != "" {
+		t.Fatalf("a refused call reached go2rtc: %s", r)
 	}
 }
 

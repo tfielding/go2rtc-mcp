@@ -18,17 +18,24 @@ MCP client (e.g. signal-ollama) ⇄ go2rtc-mcp ⇄ go2rtc
 | `list_cameras` | none | Camera names, e.g. `{"cameras": ["driveway", "front_door"]}` |
 | `get_snapshot` | `camera`, optional `width` | A live JPEG as MCP image content, plus a timestamp line |
 | `get_snapshots` | optional `cameras` (default: all), optional `width` | One labelled JPEG per camera, fetched in parallel |
+| `camera_status` | optional `cameras` (default: all), optional `check` | Per camera: `active`, `media` (e.g. `video, recvonly, H264`), `viewers`, and `online` with `check` |
 
 `get_snapshots` reports a camera that fails (e.g. offline) in its text and still returns the
 others; it is only an error if every camera fails. Each image adds to the model's context, so with
 many cameras a smaller `width` (or `SNAPSHOT_WIDTH`) helps.
+
+go2rtc only connects to a camera while something is watching it, so `active: false` is normal and
+does not mean the camera is offline. `check: true` takes a small test frame from each camera to
+find out. go2rtc doesn't report resolution, so `camera_status` doesn't either.
 
 All tools are marked read-only. There is no way to add, change or delete streams.
 
 ## Safety
 
 - **Names only.** Stream sources in go2rtc usually contain camera usernames, passwords and IPs.
-  Only stream names are read from `/api/streams`; sources never leave the server.
+  Sources never leave the server. `camera_status` decodes only codec descriptions and counts from
+  `/api/streams`; URLs, addresses, SDP and user agents are dropped while parsing, and `check`
+  returns only online/offline, never go2rtc's error text.
 - **Known cameras only.** The snapshot tools only accept names returned by `list_cameras`, so a client
   can't make go2rtc open an arbitrary URL.
 - **Optional camera allowlist** (`CAMERAS`) to expose only some cameras.
