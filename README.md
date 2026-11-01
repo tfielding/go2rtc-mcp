@@ -18,15 +18,16 @@ MCP client (e.g. signal-ollama) ⇄ go2rtc-mcp ⇄ go2rtc
 | `list_cameras` | none | Camera names, e.g. `{"cameras": ["driveway", "front_door"]}` |
 | `get_snapshot` | `camera`, optional `width` | A live JPEG as MCP image content, plus a timestamp line |
 | `get_snapshots` | optional `cameras` (default: all), optional `width` | One labelled JPEG per camera, fetched in parallel |
-| `camera_status` | optional `cameras` (default: all), optional `check` | Per camera: `active`, `media` (e.g. `video, recvonly, H264`), `viewers`, and `online` with `check` |
+| `camera_status` | optional `cameras` (default: all), optional `check` | Per camera: `state`, `video` / `audio` codecs while streaming, `viewers` |
 
 `get_snapshots` reports a camera that fails (e.g. offline) in its text and still returns the
 others; it is only an error if every camera fails. Each image adds to the model's context, so with
 many cameras a smaller `width` (or `SNAPSHOT_WIDTH`) helps.
 
-go2rtc only connects to a camera while something is watching it, so `active: false` is normal and
-does not mean the camera is offline. `check: true` takes a small test frame from each camera to
-find out. go2rtc doesn't report resolution, so `camera_status` doesn't either.
+`state` is `streaming` when go2rtc is receiving video (so the camera is online) or `idle` when
+nothing is watching it. go2rtc only connects to a camera while something watches, so `idle` is normal
+and says nothing about the camera. `check: true` takes a small test frame from each idle camera and
+reports `online` or `offline` instead. go2rtc doesn't report resolution, so `camera_status` doesn't either.
 
 Snapshots for the same camera and width within `SNAPSHOT_CACHE` reuse one frame (its timestamp
 shows when it was taken), and simultaneous requests share a single fetch. This protects cameras from
@@ -53,6 +54,7 @@ All tools are marked read-only. There is no way to add, change or delete streams
 | `GO2RTC_URL` | required | go2rtc API, usually `http://<host>:1984` |
 | `GO2RTC_USERNAME` / `GO2RTC_PASSWORD` | none | If go2rtc's API has basic auth |
 | `CAMERAS` | all | Comma-separated allowlist (case-insensitive) |
+| `EXCLUDE_CAMERAS` | none | Comma-separated names or patterns to hide, e.g. `*_sub` for substreams (case-insensitive; `*`, `?`, `[...]`) |
 | `SNAPSHOT_WIDTH` | `1280` | Default width; `0` = native resolution |
 | `MAX_WIDTH` | `1920` | Cap on the width a client may request; `0` = no cap |
 | `GO2RTC_TIMEOUT` | `20s` | Limit for each go2rtc request, including connecting to an idle camera |

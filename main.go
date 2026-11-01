@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,6 +49,14 @@ func loadConfig() (config, error) {
 	for _, name := range strings.Split(os.Getenv("CAMERAS"), ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			c.opt.Allowed[strings.ToLower(name)] = true
+		}
+	}
+	for _, pat := range strings.Split(os.Getenv("EXCLUDE_CAMERAS"), ",") {
+		if pat = strings.ToLower(strings.TrimSpace(pat)); pat != "" {
+			if _, err := path.Match(pat, ""); err != nil {
+				return c, fmt.Errorf("EXCLUDE_CAMERAS: bad pattern %q", pat)
+			}
+			c.opt.Exclude = append(c.opt.Exclude, pat)
 		}
 	}
 	var err error
@@ -98,7 +107,7 @@ func run() error {
 		allowed = fmt.Sprint(len(cfg.opt.Allowed))
 	}
 	slog.Info("starting", "version", version, "listen", cfg.listen, "go2rtc", cfg.go2rtcURL,
-		"cameras", allowed, "auth", cfg.token != "", "timeout", cfg.timeout, "cache", cfg.opt.CacheTTL)
+		"cameras", allowed, "exclude", strings.Join(cfg.opt.Exclude, ","), "auth", cfg.token != "", "timeout", cfg.timeout, "cache", cfg.opt.CacheTTL)
 	if err := src.Ping(ctx); err != nil {
 		slog.Warn("go2rtc not reachable yet", "err", err)
 	}

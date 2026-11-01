@@ -9,8 +9,9 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - `get_snapshots` tool: snapshots from several cameras (or all) in one call, fetched in parallel.
   A camera that fails is reported without failing the others.
-- `camera_status` tool: whether go2rtc is connected to each camera, its codecs and viewer count,
-  and optionally (`check`) whether it is online.
+- `camera_status` tool: each camera's state (`streaming`, `idle`, or with `check` `online` /
+  `offline`), its video and audio codecs and viewer count.
+- `EXCLUDE_CAMERAS`: hide cameras by name or pattern, e.g. `*_sub` to drop substreams.
 - `SNAPSHOT_CACHE` (default `2s`): a camera's frame is reused for this long, and simultaneous
   requests share one fetch, so a looping model can't hammer cameras.
 - `GO2RTC_TIMEOUT` (default `20s`, previously fixed): limit for each go2rtc request. Snapshots that

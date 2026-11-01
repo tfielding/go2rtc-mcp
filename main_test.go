@@ -44,7 +44,7 @@ func (f *fakeGo2rtc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		      "id":1,"format_name":"rtsp","protocol":"rtsp+tcp","remote_addr":"10.0.0.20:554",
 		      "url":"rtsp://user:CAMPASS@10.0.0.20/stream1","user_agent":"CamFirmware/1.0",
 		      "sdp":"v=0\r\no=- 0 0 IN IP4 10.0.0.20\r\na=control:rtsp://user:CAMPASS@10.0.0.20/stream1",
-		      "medias":["video, recvonly, H264","audio, recvonly, PCMA/8000","video, recvonly, H264"],
+		      "medias":["video, recvonly, H264","audio, recvonly, PCMA/8000","audio, sendonly, PCMU/8000","video, recvonly, H264"],
 		      "receivers":[{"codec":{"codec_name":"h264","codec_type":"video"}}],"bytes_recv":12345
 		    }],
 		    "consumers":[{"format_name":"mjpeg","remote_addr":"10.0.0.99:51234","user_agent":"Mozilla"}]
@@ -183,6 +183,29 @@ func TestAllowlist(t *testing.T) {
 	}
 	if len(fake.frameReq) != 0 {
 		t.Fatalf("disallowed camera reached go2rtc: %v", fake.frameReq)
+	}
+}
+
+func TestExcludeCameras(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{Exclude: []string{"back_*", "gar?ge"}}})
+	res := call(t, cs, "list_cameras", nil)
+	if b, _ := json.Marshal(res.StructuredContent); string(b) != `{"cameras":["driveway"]}` {
+		t.Fatalf("got %s", b)
+	}
+	for tool, args := range map[string]map[string]any{
+		"get_snapshot":  {"camera": "Back_Yard"},
+		"get_snapshots": {"cameras": []string{"Back_Yard"}},
+		"camera_status": {"cameras": []string{"Back_Yard"}},
+	} {
+		if res := call(t, cs, tool, args); !res.IsError || !strings.Contains(text(res), `unknown camera "Back_Yard"`) {
+			t.Fatalf("%s: expected refusal, got %q", tool, text(res))
+		}
+	}
+	if got := status(t, call(t, cs, "camera_status", nil)); len(got) != 1 || got[0].Camera != "driveway" {
+		t.Fatalf("status: %+v", got)
+	}
+	if got := sortedReqs(fake); got != "" {
+		t.Fatalf("excluded camera reached go2rtc: %s", got)
 	}
 }
 
@@ -350,9 +373,9 @@ func TestCameraStatus(t *testing.T) {
 	noLeak(t, res)
 	got := status(t, res)
 	b, _ := json.Marshal(got)
-	want := `[{"camera":"Back_Yard","active":false,"viewers":0},` +
-		`{"camera":"driveway","active":true,"media":["video, recvonly, H264","audio, recvonly, PCMA/8000"],"viewers":1},` +
-		`{"camera":"garage","active":false,"viewers":0}]`
+	want := `[{"camera":"Back_Yard","state":"idle","viewers":0},` +
+		`{"camera":"driveway","state":"streaming","video":"H264","audio":"PCMA/8000","viewers":1},` +
+		`{"camera":"garage","state":"idle","viewers":0}]`
 	if string(b) != want {
 		t.Fatalf("got  %s\nwant %s", b, want)
 	}
@@ -362,22 +385,23 @@ func TestCameraStatus(t *testing.T) {
 }
 
 func TestCameraStatusCheck(t *testing.T) {
-	cs, fake, _ := start(t, config{opt: tools.Options{Allowed: map[string]bool{"driveway": true, "garage": true}}})
+	cs, fake, _ := start(t, config{})
 	res := call(t, cs, "camera_status", map[string]any{"check": true})
 	noLeak(t, res)
-	got := status(t, res)
-	if len(got) != 2 || got[0].Camera != "driveway" || got[1].Camera != "garage" {
-		t.Fatalf("cameras: %+v", got)
+	var states []string
+	for _, c := range status(t, res) {
+		states = append(states, c.Camera+"="+c.State)
 	}
-	if got[0].Online == nil || !*got[0].Online || got[1].Online == nil || *got[1].Online {
-		t.Fatalf("online: %+v", got)
+	if got := strings.Join(states, " "); got != "Back_Yard=online driveway=streaming garage=offline" {
+		t.Fatalf("states: %s", got)
 	}
-	if r := sortedReqs(fake); r != "driveway|320 garage|320" {
+	// driveway is streaming, so it is known to be online and isn't probed.
+	if r := sortedReqs(fake); r != "Back_Yard|320 garage|320" {
 		t.Fatalf("frame requests: %s", r)
 	}
 
-	res = call(t, cs, "camera_status", map[string]any{"cameras": []string{"Back_Yard"}, "check": true})
-	if !res.IsError || !strings.Contains(text(res), `unknown camera "Back_Yard"`) {
+	res = call(t, cs, "camera_status", map[string]any{"cameras": []string{"porch"}, "check": true})
+	if !res.IsError || !strings.Contains(text(res), `unknown camera "porch"`) {
 		t.Fatalf("expected refusal, got %q", text(res))
 	}
 	if r := sortedReqs(fake); r != "" {
@@ -485,6 +509,18 @@ func TestLoadConfig(t *testing.T) {
 	if len(c.opt.Allowed) != 2 || !c.opt.Allowed["driveway"] || c.opt.DefaultWidth != 1280 || c.listen != ":8090" {
 		t.Fatalf("%+v", c)
 	}
+	if len(c.opt.Exclude) != 0 {
+		t.Fatalf("exclude by default: %v", c.opt.Exclude)
+	}
+	t.Setenv("EXCLUDE_CAMERAS", " *_SUB , doorbell ")
+	if c, err = loadConfig(); err != nil || strings.Join(c.opt.Exclude, "|") != "*_sub|doorbell" {
+		t.Fatalf("exclude: %v, %v", c.opt.Exclude, err)
+	}
+	t.Setenv("EXCLUDE_CAMERAS", "[")
+	if _, err = loadConfig(); err == nil {
+		t.Fatal("bad pattern accepted")
+	}
+	t.Setenv("EXCLUDE_CAMERAS", "")
 	if c.timeout != 20*time.Second || c.opt.CacheTTL != 2*time.Second {
 		t.Fatalf("defaults: timeout %v, cache %v", c.timeout, c.opt.CacheTTL)
 	}

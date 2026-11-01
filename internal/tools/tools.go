@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type Source interface {
 
 type Options struct {
 	Allowed      map[string]bool // lowercased camera names; empty = all cameras
+	Exclude      []string        // lowercased glob patterns (e.g. "*_sub") of cameras to hide
 	DefaultWidth int             // snapshot width in pixels; 0 = native
 	MaxWidth     int             // cap on requested width; 0 = no cap
 	CacheTTL     time.Duration   // reuse a camera's frame for this long; 0 = always fetch
@@ -46,19 +48,27 @@ type SnapshotsInput struct {
 
 type StatusInput struct {
 	Cameras []string `json:"cameras,omitempty" jsonschema:"camera names, as returned by list_cameras; omit for all cameras"`
-	Check   bool     `json:"check,omitempty" jsonschema:"also take a small test frame from each camera to tell whether it is online; slower"`
+	Check   bool     `json:"check,omitempty" jsonschema:"take a small test frame from each idle camera to find out whether it is online or offline; slower"`
 }
 
 type StatusOutput struct {
 	Cameras []CameraStatus `json:"cameras"`
 }
 
+// Camera states reported by camera_status.
+const (
+	StateStreaming = "streaming" // go2rtc is receiving video now, so the camera is online
+	StateIdle      = "idle"      // nobody is watching, so go2rtc isn't connected; says nothing about the camera
+	StateOnline    = "online"    // idle, but a test frame worked (check)
+	StateOffline   = "offline"   // idle, and a test frame failed (check)
+)
+
 type CameraStatus struct {
-	Camera  string   `json:"camera"`
-	Active  bool     `json:"active" jsonschema:"go2rtc is connected to the camera right now; false only means nobody is watching, not that it is offline"`
-	Media   []string `json:"media,omitempty" jsonschema:"tracks and codecs while active, e.g. 'video, recvonly, H264'"`
-	Viewers int      `json:"viewers" jsonschema:"clients currently watching the stream"`
-	Online  *bool    `json:"online,omitempty" jsonschema:"only with check: whether a test frame could be taken"`
+	Camera  string `json:"camera"`
+	State   string `json:"state" jsonschema:"streaming: receiving video now, so online. idle: nobody is watching so go2rtc is not connected; this is normal and does not mean offline. online/offline: result of check for an idle camera"`
+	Video   string `json:"video,omitempty" jsonschema:"video codec while streaming, e.g. H264 or H265"`
+	Audio   string `json:"audio,omitempty" jsonschema:"audio codec while streaming, e.g. PCMA/8000; absent if the camera sends no audio"`
+	Viewers int    `json:"viewers" jsonschema:"clients currently watching the stream"`
 }
 
 // checkWidth is the frame width used by camera_status check; small, since the image is discarded.
@@ -88,8 +98,8 @@ func Register(s *mcp.Server, src Source, opt Options) {
 	}, t.snapshots)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "camera_status",
-		Description: "Show each camera's state: whether go2rtc is connected to it now, its codecs and how many clients are watching. " +
-			"go2rtc only connects while someone watches, so inactive is normal; use check to test whether cameras are online.",
+		Description: "Show each camera's state (streaming, idle, or with check online/offline), its codecs and how many clients are watching. " +
+			"go2rtc only connects to a camera while someone watches it, so idle is normal and not a fault; use check to find out whether idle cameras are online.",
 		Annotations: readOnly("Camera status"),
 	}, t.status)
 }
@@ -110,16 +120,27 @@ func (t *toolset) cameras(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(t.opt.Allowed) == 0 {
-		return all, nil
-	}
 	var out []string
 	for _, name := range all {
-		if t.opt.Allowed[strings.ToLower(name)] {
+		if t.visible(name) {
 			out = append(out, name)
 		}
 	}
 	return out, nil
+}
+
+// visible applies the allowlist and the exclude patterns, both case-insensitive.
+func (t *toolset) visible(name string) bool {
+	lower := strings.ToLower(name)
+	if len(t.opt.Allowed) > 0 && !t.opt.Allowed[lower] {
+		return false
+	}
+	for _, pat := range t.opt.Exclude {
+		if ok, _ := path.Match(pat, lower); ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *toolset) list(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, ListOutput, error) {
@@ -202,22 +223,55 @@ func (t *toolset) status(ctx context.Context, _ *mcp.CallToolRequest, in StatusI
 	for _, s := range all {
 		byName[s.Name] = s
 	}
-	var shots []shot
-	if in.Check {
-		shots = t.frames(ctx, names, checkWidth)
-	}
-
 	out := StatusOutput{Cameras: make([]CameraStatus, len(names))}
+	var idle []int // cameras whose online state is unknown
 	for i, name := range names {
 		s := byName[name]
-		out.Cameras[i] = CameraStatus{Camera: name, Active: s.Active, Media: s.Media, Viewers: s.Consumers}
-		if in.Check {
-			online := shots[i].err == nil
-			out.Cameras[i].Online = &online
+		out.Cameras[i] = CameraStatus{Camera: name, State: StateIdle, Viewers: s.Consumers}
+		out.Cameras[i].Video, out.Cameras[i].Audio = codecs(s.Media)
+		if s.Active {
+			out.Cameras[i].State = StateStreaming
+		} else {
+			idle = append(idle, i)
 		}
 	}
-	slog.Info("camera_status", "count", len(names), "check", in.Check)
+	// A streaming camera is online by definition, so only idle ones need a test frame.
+	if in.Check && len(idle) > 0 {
+		probe := make([]string, len(idle))
+		for j, i := range idle {
+			probe[j] = names[i]
+		}
+		for j, s := range t.frames(ctx, probe, checkWidth) {
+			out.Cameras[idle[j]].State = StateOnline
+			if s.err != nil {
+				out.Cameras[idle[j]].State = StateOffline
+			}
+		}
+	}
+	slog.Info("camera_status", "count", len(names), "check", in.Check, "probed", len(idle)*boolInt(in.Check))
 	return nil, out, nil
+}
+
+// codecs turns go2rtc media descriptions ("video, recvonly, H264") into the codecs the camera
+// sends. sendonly media (e.g. two-way audio back to the camera) is skipped.
+func codecs(media []string) (video, audio string) {
+	var v, a []string
+	for _, m := range media {
+		parts := strings.Split(m, ", ")
+		if len(parts) < 3 || parts[1] != "recvonly" {
+			continue
+		}
+		switch parts[0] {
+		case "video":
+			v = append(v, parts[2:]...)
+		case "audio":
+			for _, c := range parts[2:] {
+				// go2rtc uses the RTP name for AAC; show the familiar one, keeping the sample rate.
+				a = append(a, strings.Replace(c, "MPEG4-GENERIC", "AAC", 1))
+			}
+		}
+	}
+	return strings.Join(v, ", "), strings.Join(a, ", ")
 }
 
 type shot struct {
@@ -304,6 +358,13 @@ func isTimeout(err error) bool {
 
 func unknownCamera(name string, cams []string) error {
 	return fmt.Errorf("unknown camera %q; available: %s", name, strings.Join(cams, ", "))
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func stamp(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") }
