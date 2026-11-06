@@ -2,9 +2,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"log/slog"
 	"net"
 	"path"
@@ -30,6 +33,7 @@ type Options struct {
 	DefaultWidth int             // snapshot width in pixels; 0 = native
 	MaxWidth     int             // cap on requested width; 0 = no cap
 	CacheTTL     time.Duration   // reuse a camera's frame for this long; 0 = always fetch
+	LabelCorner  Corner          // where get_snapshots grid labels go; empty = bottom-left
 }
 
 type ListOutput struct {
@@ -42,8 +46,9 @@ type SnapshotInput struct {
 }
 
 type SnapshotsInput struct {
-	Cameras []string `json:"cameras,omitempty" jsonschema:"camera names, as returned by list_cameras; omit for all cameras"`
-	Width   int      `json:"width,omitempty" jsonschema:"optional image width in pixels for every image; smaller is faster"`
+	Cameras  []string `json:"cameras,omitempty" jsonschema:"camera names, as returned by list_cameras; omit for all cameras"`
+	Width    int      `json:"width,omitempty" jsonschema:"optional width in pixels: of the whole grid, or of every image with separate. Default 1280 for the grid"`
+	Separate bool     `json:"separate,omitempty" jsonschema:"one image per camera instead of a single grid picture"`
 }
 
 type StatusInput struct {
@@ -92,8 +97,9 @@ func Register(s *mcp.Server, src Source, opt Options) {
 	}, t.snapshot)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "get_snapshots",
-		Description: "Take live snapshots (JPEG images) from several cameras at once, or all cameras if none are named. " +
-			"Each image is preceded by a line naming its camera. Cameras that fail are reported without failing the rest.",
+		Description: "Take live snapshots from several cameras at once, or all cameras if none are named, as one picture: " +
+			"a numbered grid, with a list saying which number is which camera. Use for \"what do the cameras show?\". " +
+			"Cameras that fail get an empty tile and are reported without failing the rest. With separate, one image per camera instead.",
 		Annotations: readOnly("Camera snapshots"),
 	}, t.snapshots)
 	mcp.AddTool(s, &mcp.Tool{
@@ -187,6 +193,9 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 	if err != nil {
 		return nil, nil, err
 	}
+	if !in.Separate {
+		return t.grid(ctx, names, in.Width)
+	}
 	shots := t.frames(ctx, names, t.width(in.Width))
 
 	content := []mcp.Content{}
@@ -204,6 +213,58 @@ func (t *toolset) snapshots(ctx context.Context, _ *mcp.CallToolRequest, in Snap
 	}
 	// Only a total failure is an error; partial results are still useful.
 	return &mcp.CallToolResult{Content: content, IsError: failed == len(names)}, nil, nil
+}
+
+// grid answers get_snapshots with one picture: the cameras' frames in a numbered grid, each
+// fetched at its tile's width, plus a list of which number is which camera.
+func (t *toolset) grid(ctx context.Context, names []string, width int) (*mcp.CallToolResult, any, error) {
+	total := gridWidth
+	if width > 0 {
+		total = max(t.width(width), gridMinWidth)
+	}
+	l := newLayout(len(names), total)
+	l.corner = t.opt.LabelCorner
+	shots := t.frames(ctx, names, l.cellW)
+
+	var b strings.Builder
+	b.WriteString("Live snapshots, numbered as in the grid (left to right, top to bottom):\n")
+	pics := make([]image.Image, len(names))
+	labels := make([]string, len(names))
+	failed := 0
+	for i, name := range names {
+		labels[i] = fmt.Sprintf("%d) %s", i+1, name)
+		if shots[i].err != nil {
+			failed++
+			fmt.Fprintf(&b, "%d. %s: failed: %v\n", i+1, name, shots[i].err)
+			continue
+		}
+		img, err := jpeg.Decode(bytes.NewReader(shots[i].jpeg))
+		if err != nil {
+			failed++
+			slog.Error("get_snapshots: bad frame", "camera", name, "err", err)
+			fmt.Fprintf(&b, "%d. %s: failed: go2rtc didn't send a usable picture\n", i+1, name)
+			continue
+		}
+		pics[i] = img
+		fmt.Fprintf(&b, "%d. %s at %s\n", i+1, name, stamp(shots[i].at))
+	}
+	if failed == len(names) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: b.String()}}, IsError: true}, nil, nil
+	}
+	if failed > 0 {
+		b.WriteString("Cameras that failed have an empty tile. ")
+	}
+	b.WriteString("Use get_snapshot with a camera for a bigger picture of one.")
+	jpg, err := l.render(pics, labels, "offline")
+	if err != nil {
+		slog.Error("get_snapshots: encode", "err", err)
+		return nil, nil, errors.New("couldn't build the picture grid (details in the go2rtc-mcp log)")
+	}
+	slog.Info("get_snapshots", "cameras", len(names), "failed", failed, "bytes", len(jpg))
+	return &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: b.String()},
+		&mcp.ImageContent{Data: jpg, MIMEType: "image/jpeg"},
+	}}, nil, nil
 }
 
 func (t *toolset) status(ctx context.Context, _ *mcp.CallToolRequest, in StatusInput) (*mcp.CallToolResult, StatusOutput, error) {

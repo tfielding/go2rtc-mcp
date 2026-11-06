@@ -72,6 +72,9 @@ func loadConfig() (config, error) {
 	if c.opt.CacheTTL, err = duration("SNAPSHOT_CACHE", "2s"); err != nil || c.opt.CacheTTL < 0 {
 		return c, errors.New("SNAPSHOT_CACHE must be a non-negative duration, e.g. 2s (0 = no cache; bare numbers are seconds)")
 	}
+	if c.opt.LabelCorner, err = tools.ParseCorner(os.Getenv("GRID_LABEL_POSITION")); err != nil {
+		return c, fmt.Errorf("GRID_LABEL_POSITION: %w", err)
+	}
 	return c, nil
 }
 

@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `get_snapshots` returns one picture by default: the cameras in a numbered grid, with a list of
+  which number is which camera. Local vision models handle one image better than several, and it
+  costs far less context. Each frame is fetched at its tile's width; a camera that fails gets an
+  empty tile. `separate: true` returns one image per camera as before. `GRID_LABEL_POSITION` sets
+  the corner for the labels (default bottom-left).
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

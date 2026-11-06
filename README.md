@@ -17,12 +17,19 @@ MCP client (e.g. signal-ollama) ⇄ go2rtc-mcp ⇄ go2rtc
 |---|---|---|
 | `list_cameras` | none | Camera names, e.g. `{"cameras": ["driveway", "front_door"]}` |
 | `get_snapshot` | `camera`, optional `width` | A live JPEG as MCP image content, plus a timestamp line |
-| `get_snapshots` | optional `cameras` (default: all), optional `width` | One labelled JPEG per camera, fetched in parallel |
+| `get_snapshots` | optional `cameras` (default: all), optional `width`, optional `separate` | One picture: the cameras in a numbered grid, plus a list of which number is which camera. With `separate: true`, one labelled JPEG per camera instead |
 | `camera_status` | optional `cameras` (default: all), optional `check` | Per camera: `state`, `video` / `audio` codecs while streaming, `viewers` |
 
-`get_snapshots` reports a camera that fails (e.g. offline) in its text and still returns the
-others; it is only an error if every camera fails. Each image adds to the model's context, so with
-many cameras a smaller `width` (or `SNAPSHOT_WIDTH`) helps.
+`get_snapshots` returns all the cameras as **one picture**: a numbered grid of 16:9 tiles (within
+1280x720 by default; `width` sets the whole grid's width), each tile labelled `1) driveway`, with a
+list of which number is which camera and when each frame was taken. Many local vision models handle
+one image much better than several, and one picture costs far less context. Each frame is fetched
+from go2rtc at its tile's width, frames keep their shape (portrait doorbells are letterboxed), and
+`GRID_LABEL_POSITION` moves the labels clear of your cameras' own on-screen text. With
+`separate: true` you get one image per camera, as before.
+
+A camera that fails (e.g. offline) gets an empty "offline" tile and is reported in the text; the
+others are still returned. It is only an error if every camera fails.
 
 `state` is `streaming` when go2rtc is receiving video (so the camera is online) or `idle` when
 nothing is watching it. go2rtc only connects to a camera while something watches, so `idle` is normal
@@ -59,6 +66,7 @@ All tools are marked read-only. There is no way to add, change or delete streams
 | `MAX_WIDTH` | `1920` | Cap on the width a client may request; `0` = no cap |
 | `GO2RTC_TIMEOUT` | `20s` | Limit for each go2rtc request, including connecting to an idle camera |
 | `SNAPSHOT_CACHE` | `2s` | Reuse a camera's frame for this long instead of asking the camera again; `0` = off |
+| `GRID_LABEL_POSITION` | `bottom-left` | Corner for the `get_snapshots` grid labels: `top-left`, `top-right`, `bottom-left` or `bottom-right`. Pick one clear of your cameras' own timestamp |
 | `AUTH_TOKEN` | none | Require `Authorization: Bearer <token>` on `/mcp` |
 | `LISTEN_ADDR` | `:8090` | |
 

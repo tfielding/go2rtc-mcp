@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -18,7 +22,18 @@ import (
 	"github.com/tfielding/go2rtc-mcp/internal/tools"
 )
 
-var fakeJPEG = []byte{0xFF, 0xD8, 0xFF, 0xE0, 'f', 'a', 'k', 'e', 0xFF, 0xD9}
+var fakeJPEG = solidJPEG(160, 90)
+
+// solidJPEG is a real (decodable) JPEG of one colour, as go2rtc would send.
+func solidJPEG(w, h int) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0, 255, 255}), image.Point{}, draw.Src)
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		panic(err)
+	}
+	return b.Bytes()
+}
 
 // fakeGo2rtc mimics the parts of the go2rtc API we use, including stream
 // sources that contain credentials (which must never leak).
@@ -279,7 +294,7 @@ func sortedReqs(f *fakeGo2rtc) string {
 
 func TestSnapshotsAll(t *testing.T) {
 	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, MaxWidth: 1920}})
-	res := call(t, cs, "get_snapshots", nil)
+	res := call(t, cs, "get_snapshots", map[string]any{"separate": true})
 	if res.IsError {
 		t.Fatalf("partial failure should not be an error: %s", text(res))
 	}
@@ -307,7 +322,7 @@ func TestSnapshotsAll(t *testing.T) {
 
 func TestSnapshotsSelected(t *testing.T) {
 	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, MaxWidth: 1920}})
-	res := call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"DRIVEWAY", "back_yard", "driveway"}, "width": 99999})
+	res := call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"DRIVEWAY", "back_yard", "driveway"}, "width": 99999, "separate": true})
 	if res.IsError || images(res) != 2 {
 		t.Fatalf("got %s", text(res))
 	}
@@ -323,15 +338,79 @@ func TestSnapshotsSelected(t *testing.T) {
 		t.Fatalf("a refused call reached go2rtc: %s", got)
 	}
 
-	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"garage"}})
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"garage"}, "separate": true})
 	if !res.IsError || !strings.Contains(text(res), "garage failed") {
 		t.Fatalf("all-failed should be an error, got %q", text(res))
 	}
 }
 
+// gridImage returns the one image in res, decoded.
+func gridImage(t *testing.T, res *mcp.CallToolResult) image.Image {
+	t.Helper()
+	var found []byte
+	for _, c := range res.Content {
+		if ic, ok := c.(*mcp.ImageContent); ok {
+			if found != nil {
+				t.Fatal("more than one image")
+			}
+			found = ic.Data
+		}
+	}
+	if found == nil {
+		t.Fatalf("no image: %s", text(res))
+	}
+	img, err := jpeg.Decode(bytes.NewReader(found))
+	if err != nil {
+		t.Fatalf("not a JPEG: %v", err)
+	}
+	return img
+}
+
+func TestSnapshotsGrid(t *testing.T) {
+	cs, fake, _ := start(t, config{opt: tools.Options{DefaultWidth: 1280, MaxWidth: 1920}})
+	res := call(t, cs, "get_snapshots", nil)
+	if res.IsError {
+		t.Fatalf("partial failure should not be an error: %s", text(res))
+	}
+	noLeak(t, res)
+	got := text(res)
+	for _, want := range []string{"Live snapshots, numbered as in the grid (left to right, top to bottom):\n",
+		"1. Back_Yard at ", "2. driveway at ", "3. garage: failed: camera garage is offline or unreachable",
+		"Cameras that failed have an empty tile."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// 3 cameras: a 2x2 grid within 1280x720, each frame fetched at its tile's width.
+	if b := gridImage(t, res).Bounds(); b.Dx() != 1276 || b.Dy() != 718 {
+		t.Errorf("grid size %v", b)
+	}
+	if reqs := sortedReqs(fake); reqs != "Back_Yard|636 driveway|636 garage|636" {
+		t.Errorf("frame requests: %s", reqs)
+	}
+
+	// A width sets the whole grid's size, capped like any width.
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"driveway"}, "width": 99999})
+	if b := gridImage(t, res).Bounds(); b.Dx() != 1920 || b.Dy() != 1080 {
+		t.Errorf("one camera at the cap: %v", b)
+	}
+	sortedReqs(fake)
+
+	// Every camera failing is an error, with no picture.
+	res = call(t, cs, "get_snapshots", map[string]any{"cameras": []string{"garage"}})
+	if !res.IsError || !strings.Contains(text(res), "1. garage: failed:") {
+		t.Fatalf("got %s", text(res))
+	}
+	for _, c := range res.Content {
+		if _, ok := c.(*mcp.ImageContent); ok {
+			t.Fatal("picture sent although every camera failed")
+		}
+	}
+}
+
 func TestSnapshotsAllowlist(t *testing.T) {
 	cs, fake, _ := start(t, config{opt: tools.Options{Allowed: map[string]bool{"driveway": true}}})
-	res := call(t, cs, "get_snapshots", nil)
+	res := call(t, cs, "get_snapshots", map[string]any{"separate": true})
 	if res.IsError || images(res) != 1 {
 		t.Fatalf("got %s", text(res))
 	}
