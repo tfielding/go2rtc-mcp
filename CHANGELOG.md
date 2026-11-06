@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
 ### Changed
 - `get_snapshots` returns one picture by default: the cameras in a numbered grid, with a list of
   which number is which camera. Local vision models handle one image better than several, and it
