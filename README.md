@@ -77,12 +77,20 @@ services:
   go2rtc-mcp:
     image: ghcr.io/tfielding/go2rtc-mcp:latest
     restart: always
+    healthcheck:
+      test: ["CMD", "/go2rtc-mcp", "-healthcheck"]
+      interval: 1m
+      timeout: 15s
+      start_period: 30s
     environment:
       - GO2RTC_URL=http://<go2rtc-host>:1984
 ```
 
 MCP clients on the same Docker network connect to `http://go2rtc-mcp:8090/mcp`.
-`GET /healthz` returns 200 when go2rtc is reachable.
+`GET /healthz` returns 200 when go2rtc is reachable. The image has no shell or curl, so the
+`healthcheck:` above runs `go2rtc-mcp -healthcheck`, which checks `/healthz` from inside the container.
+With it, other services can wait for go2rtc-mcp with
+`depends_on: {go2rtc-mcp: {condition: service_healthy}}`.
 
 go2rtc's API listens on port 1984 by default. If go2rtc runs in another container, either put
 go2rtc-mcp on the same Docker network and use that container's name as the host, or publish

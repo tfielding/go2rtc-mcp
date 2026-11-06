@@ -3,6 +3,11 @@ services:
     container_name: go2rtc-mcp
     image: ghcr.io/tfielding/go2rtc-mcp:latest
     restart: always
+    healthcheck:
+      test: ["CMD", "/go2rtc-mcp", "-healthcheck"]
+      interval: 1m
+      timeout: 15s
+      start_period: 30s
     environment:
       - GO2RTC_URL=http://<go2rtc-host>:1984
       # - GO2RTC_USERNAME=admin        # if go2rtc's API has a username/password
